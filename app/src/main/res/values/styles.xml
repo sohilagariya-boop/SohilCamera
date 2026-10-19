@@ -1,16 +1,63 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="ChipText">
+    <style name="TopBtn">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">6dp</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+    <style name="TopIcon">
+        <item name="android:layout_width">26dp</item>
+        <item name="android:layout_height">26dp</item>
+    </style>
+    <style name="TopLabel">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
-        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:textSize">10sp</item>
+        <item name="android:layout_marginTop">2dp</item>
+    </style>
+    <style name="ModeTab">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">20dp</item>
+        <item name="android:paddingEnd">20dp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+    <style name="ProTab">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">8dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+    <style name="ZoomChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginStart">5dp</item>
+        <item name="android:layout_marginEnd">5dp</item>
+        <item name="android:minWidth">44dp</item>
+        <item name="android:gravity">center</item>
         <item name="android:background">@drawable/chip_bg</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:textSize">13sp</item>
-        <item name="android:paddingStart">14dp</item>
-        <item name="android:paddingEnd">14dp</item>
-        <item name="android:paddingTop">8dp</item>
-        <item name="android:paddingBottom">8dp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:paddingTop">7dp</item>
+        <item name="android:paddingBottom">7dp</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
     </style>

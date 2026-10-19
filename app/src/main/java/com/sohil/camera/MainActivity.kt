@@ -77,22 +77,38 @@ class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
     private lateinit var locText: TextView
     private lateinit var thumb: ImageView
-    private lateinit var flashChip: TextView
-    private lateinit var timerChip: TextView
-    private lateinit var burstChip: TextView
-    private lateinit var gridChip: TextView
-    private lateinit var proChip: TextView
-    private lateinit var setChip: TextView
-    private lateinit var flipBtn: TextView
+    private lateinit var btnTimer: View
+    private lateinit var btnBurst: View
+    private lateinit var btnGrid: View
+    private lateinit var btnFlash: View
+    private lateinit var iconTimer: ImageView
+    private lateinit var iconBurst: ImageView
+    private lateinit var iconGrid: ImageView
+    private lateinit var iconFlash: ImageView
+    private lateinit var lblTimer: TextView
+    private lateinit var lblBurst: TextView
+    private lateinit var lblGrid: TextView
+    private lateinit var lblFlash: TextView
+    private lateinit var flipBtn: ImageView
     private lateinit var recTimer: TextView
     private lateinit var photoTab: TextView
     private lateinit var videoTab: TextView
+    private lateinit var proModeTab: TextView
     private lateinit var captureBtn: View
     private lateinit var grid: View
     private lateinit var focusRing: View
     private lateinit var countdown: TextView
     private lateinit var zoomText: TextView
+    private lateinit var z1: TextView
+    private lateinit var z2: TextView
+    private lateinit var z4: TextView
     private lateinit var proPanel: View
+    private lateinit var wbScroll: View
+    private lateinit var isoScroll: View
+    private lateinit var evBox: View
+    private lateinit var tabWb: TextView
+    private lateinit var tabIso: TextView
+    private lateinit var tabEv: TextView
     private lateinit var evLabel: TextView
     private lateinit var evSeek: SeekBar
     private lateinit var isoRow: LinearLayout
@@ -112,7 +128,20 @@ class MainActivity : AppCompatActivity() {
     private var saving = false
 
     // options
-    private var flashState = 0                  // 0 off, 1 auto, 2 on, 3 torch
+    private var flashState = 0                  // 0 off, 1 auto, 2 torch (always on)
+    private var uiMode = 0                      // 0 photo, 1 video, 2 pro
+    private var proTab = 0
+    private var curEv = 0f
+    private var curZoom = 1f
+    private var minZoom = 1f
+    private var maxZoom = 8f
+    private var cam2Applied = false
+    private var zoomLive: androidx.lifecycle.LiveData<ZoomState>? = null
+    private val zoomObs = androidx.lifecycle.Observer<ZoomState> { zs ->
+        minZoom = zs.minZoomRatio; maxZoom = zs.maxZoomRatio
+    }
+    private var refreshIso: () -> Unit = {}
+    private var refreshWb: () -> Unit = {}
     private val timerOpts = listOf(0, 3, 5, 10)
     private var timerIdx = 0
     private val burstOpts = listOf(1, 3, 5, 10)
@@ -170,24 +199,39 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         preview = findViewById(R.id.preview)
+        preview.scaleType = PreviewView.ScaleType.FIT_CENTER
         locText = findViewById(R.id.locText)
         thumb = findViewById(R.id.thumb)
-        flashChip = findViewById(R.id.flashChip)
-        timerChip = findViewById(R.id.timerChip)
-        burstChip = findViewById(R.id.burstChip)
-        gridChip = findViewById(R.id.gridChip)
-        proChip = findViewById(R.id.proChip)
-        setChip = findViewById(R.id.setChip)
+        btnTimer = findViewById(R.id.btnTimer)
+        btnBurst = findViewById(R.id.btnBurst)
+        btnGrid = findViewById(R.id.btnGrid)
+        btnFlash = findViewById(R.id.btnFlash)
+        iconTimer = findViewById(R.id.iconTimer)
+        iconBurst = findViewById(R.id.iconBurst)
+        iconGrid = findViewById(R.id.iconGrid)
+        iconFlash = findViewById(R.id.iconFlash)
+        lblTimer = findViewById(R.id.lblTimer)
+        lblBurst = findViewById(R.id.lblBurst)
+        lblGrid = findViewById(R.id.lblGrid)
+        lblFlash = findViewById(R.id.lblFlash)
         flipBtn = findViewById(R.id.flipBtn)
         recTimer = findViewById(R.id.recTimer)
         photoTab = findViewById(R.id.photoTab)
         videoTab = findViewById(R.id.videoTab)
+        proModeTab = findViewById(R.id.proTabMode)
         captureBtn = findViewById(R.id.captureBtn)
         grid = findViewById(R.id.grid)
         focusRing = findViewById(R.id.focusRing)
         countdown = findViewById(R.id.countdown)
         zoomText = findViewById(R.id.zoomText)
+        z1 = findViewById(R.id.z1); z2 = findViewById(R.id.z2); z4 = findViewById(R.id.z4)
         proPanel = findViewById(R.id.proPanel)
+        wbScroll = findViewById(R.id.wbScroll)
+        isoScroll = findViewById(R.id.isoScroll)
+        evBox = findViewById(R.id.evBox)
+        tabWb = findViewById(R.id.tabWb)
+        tabIso = findViewById(R.id.tabIso)
+        tabEv = findViewById(R.id.tabEv)
         evLabel = findViewById(R.id.evLabel)
         evSeek = findViewById(R.id.evSeek)
         isoRow = findViewById(R.id.isoRow)
@@ -204,31 +248,28 @@ class MainActivity : AppCompatActivity() {
             onShutter()
         }
         flipBtn.setOnClickListener { flipCamera() }
-        photoTab.setOnClickListener { setMode(false) }
-        videoTab.setOnClickListener { setMode(true) }
-        flashChip.setOnClickListener { cycleFlash() }
-        timerChip.setOnClickListener {
+        photoTab.setOnClickListener { setMode(0) }
+        videoTab.setOnClickListener { setMode(1) }
+        proModeTab.setOnClickListener { setMode(2) }
+        findViewById<View>(R.id.btnMenu).setOnClickListener { showSettings() }
+        btnFlash.setOnClickListener { cycleFlash() }
+        btnTimer.setOnClickListener {
             timerIdx = (timerIdx + 1) % timerOpts.size
-            timerChip.text = if (timerOpts[timerIdx] == 0) "⏱ Off" else "⏱ ${timerOpts[timerIdx]}s"
-            setChipOn(timerChip, timerIdx != 0)
+            lblTimer.text = if (timerOpts[timerIdx] == 0) "Off" else "${timerOpts[timerIdx]}s"
+            tint(iconTimer, lblTimer, timerIdx != 0)
         }
-        burstChip.setOnClickListener {
+        btnBurst.setOnClickListener {
             if (videoMode) { toast("Burst sirf photo mode mein"); return@setOnClickListener }
             burstIdx = (burstIdx + 1) % burstOpts.size
-            burstChip.text = "🔁 ${burstOpts[burstIdx]}x"
-            setChipOn(burstChip, burstIdx != 0)
+            lblBurst.text = "${burstOpts[burstIdx]}x"
+            tint(iconBurst, lblBurst, burstIdx != 0)
         }
-        gridChip.setOnClickListener {
+        btnGrid.setOnClickListener {
             gridOn = !gridOn
             grid.visibility = if (gridOn) View.VISIBLE else View.GONE
-            setChipOn(gridChip, gridOn)
+            lblGrid.text = if (gridOn) "On" else "Off"
+            tint(iconGrid, lblGrid, gridOn)
         }
-        proChip.setOnClickListener {
-            val show = proPanel.visibility != View.VISIBLE
-            proPanel.visibility = if (show) View.VISIBLE else View.GONE
-            setChipOn(proChip, show)
-        }
-        setChip.setOnClickListener { showSettings() }
         thumb.setOnClickListener {
             val u = lastUri ?: return@setOnClickListener
             try {
@@ -236,12 +277,27 @@ class MainActivity : AppCompatActivity() {
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
             } catch (_: Exception) { toast("Gallery nahi khuli") }
         }
-        for (c in listOf(flashChip, timerChip, burstChip, gridChip, proChip, setChip)) setChipOn(c, false)
+        z1.setOnClickListener { setZoom(1f, true) }
+        z2.setOnClickListener { setZoom(2f, true) }
+        z4.setOnClickListener { setZoom(4f, true) }
+        tabWb.setOnClickListener { showProTab(0) }
+        tabIso.setOnClickListener { showProTab(1) }
+        tabEv.setOnClickListener { showProTab(2) }
 
         setupGestures()
         setupProPanel()
+        showProTab(0)
+        updateModeTabs()
+        updateZoomUi()
 
         if (allGranted()) startAll() else ActivityCompat.requestPermissions(this, askPerms(), 10)
+    }
+
+    private val yellow = Color.parseColor("#FFC107")
+
+    private fun tint(icon: ImageView, label: TextView, on: Boolean) {
+        icon.setColorFilter(if (on) yellow else Color.WHITE)
+        label.setTextColor(if (on) yellow else Color.WHITE)
     }
 
     private var photoSizeIdx = 0
@@ -287,19 +343,13 @@ class MainActivity : AppCompatActivity() {
         catch (_: SecurityException) {}
     }
 
-    // ---------------------------------------------------------------- gestures
+    // ---------------------------------------------------------------- gestures / zoom / focus
     @SuppressLint("ClickableViewAccessibility")
     private fun setupGestures() {
         val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
-                val cam = camera ?: return true
-                val zs = cam.cameraInfo.zoomState.value ?: return true
-                val ratio = (zs.zoomRatio * d.scaleFactor).coerceIn(zs.minZoomRatio, zs.maxZoomRatio)
-                cam.cameraControl.setZoomRatio(ratio)
-                zoomText.text = String.format(Locale.US, "%.1fx", ratio)
-                zoomText.visibility = View.VISIBLE
-                zoomText.removeCallbacks(hideZoom)
-                zoomText.postDelayed(hideZoom, 1200)
+                setZoom(curZoom * d.scaleFactor, false)
+                showZoomPopup()
                 return true
             }
         })
@@ -313,7 +363,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setZoom(r: Float, popup: Boolean) {
+        val z = r.coerceIn(minZoom, max(minZoom, maxZoom))
+        curZoom = z
+        val cam = camera
+        if (cam != null) {
+            try { cam.cameraControl.setZoomRatio(z) } catch (_: Exception) {}
+        }
+        updateZoomUi()
+        if (popup) showZoomPopup()
+    }
+
+    private fun showZoomPopup() {
+        zoomText.text = String.format(Locale.US, "%.1fx", curZoom)
+        zoomText.visibility = View.VISIBLE
+        zoomText.removeCallbacks(hideZoom)
+        zoomText.postDelayed(hideZoom, 1000)
+    }
+
     private val hideZoom = Runnable { zoomText.visibility = View.INVISIBLE }
+
+    private fun updateZoomUi() {
+        setChipOn(z1, abs(curZoom - 1f) < 0.15f)
+        setChipOn(z2, abs(curZoom - 2f) < 0.15f)
+        setChipOn(z4, abs(curZoom - 4f) < 0.15f)
+    }
 
     private fun focusAt(x: Float, y: Float) {
         val cam = camera ?: return
@@ -373,7 +447,16 @@ class MainActivity : AppCompatActivity() {
                 imageCapture = ic
                 p.bindToLifecycle(this, sel, pv, ic)
             }
-            if (camera?.cameraInfo?.hasFlashUnit() != true) flashState = 0
+            val cam = camera!!
+            // zoom limits (observe so the value is always available)
+            zoomLive?.removeObserver(zoomObs)
+            zoomLive = cam.cameraInfo.zoomState
+            zoomLive?.observe(this, zoomObs)
+            cam.cameraInfo.zoomState.value?.let { minZoom = it.minZoomRatio; maxZoom = it.maxZoomRatio }
+            curZoom = 1f
+            updateZoomUi()
+            if (cam.cameraInfo.hasFlashUnit() != true) flashState = 0
+            cam2Applied = false
             applyFlash()
             setupExposure()
             applyCam2()
@@ -389,54 +472,99 @@ class MainActivity : AppCompatActivity() {
         bindUseCases()
     }
 
-    private fun setMode(video: Boolean) {
-        if (recording != null || video == videoMode) return
-        videoMode = video
-        if (video && (flashState == 1 || flashState == 2)) flashState = 0
-        photoTab.setTextColor(if (video) Color.WHITE else Color.parseColor("#FFC107"))
-        videoTab.setTextColor(if (video) Color.parseColor("#FFC107") else Color.WHITE)
-        captureBtn.setBackgroundResource(if (video) R.drawable.capture_video else R.drawable.capture_button)
-        bindUseCases()
+    // ---------------------------------------------------------------- modes
+    private fun setMode(m: Int) {
+        if (recording != null || m == uiMode) return
+        val wasVideo = videoMode
+        val wasPro = uiMode == 2
+        uiMode = m
+        videoMode = (m == 1)
+        proPanel.visibility = if (m == 2) View.VISIBLE else View.GONE
+        if (videoMode && flashState == 1) flashState = 0
+        captureBtn.setBackgroundResource(if (videoMode) R.drawable.capture_video else R.drawable.capture_button)
+        updateModeTabs()
+        if (wasPro && m != 2) resetPro()
+        if (wasVideo != videoMode) bindUseCases() else applyFlash()
+    }
+
+    private fun updateModeTabs() {
+        photoTab.setTextColor(if (uiMode == 0) yellow else Color.WHITE)
+        videoTab.setTextColor(if (uiMode == 1) yellow else Color.WHITE)
+        proModeTab.setTextColor(if (uiMode == 2) yellow else Color.WHITE)
+    }
+
+    private fun resetPro() {
+        isoIdx = 0; wbIdx = 0; refreshIso(); refreshWb()
+        curEv = 0f
+        camera?.cameraControl?.setExposureCompensationIndex(0)
+        evRange?.let { evSeek.progress = -it.lower }
+        evLabel.text = "Exposure: 0.0"
+        updateProTabs()
+        applyCam2()
     }
 
     // ---------------------------------------------------------------- flash / torch
     private fun cycleFlash() {
-        if (camera?.cameraInfo?.hasFlashUnit() != true) { toast("Is camera mein flash nahi hai"); return }
-        flashState = if (videoMode) (if (flashState == 3) 0 else 3) else (flashState + 1) % 4
+        if (camera?.cameraInfo?.hasFlashUnit() != true) { toast("Is camera mein flash/torch nahi hai"); return }
+        flashState = if (videoMode) (if (flashState == 2) 0 else 2) else (flashState + 1) % 3
         applyFlash()
     }
 
     private fun applyFlash() {
-        camera?.cameraControl?.enableTorch(flashState == 3)
-        imageCapture?.flashMode = when (flashState) {
-            1 -> ImageCapture.FLASH_MODE_AUTO
-            2 -> ImageCapture.FLASH_MODE_ON
-            else -> ImageCapture.FLASH_MODE_OFF
+        val cam = camera
+        if (cam != null && cam.cameraInfo.hasFlashUnit()) {
+            val want = flashState == 2
+            val f = cam.cameraControl.enableTorch(want)
+            f.addListener({
+                try { if (!f.isCancelled) f.get() }
+                catch (_: Exception) { if (want) toast("Torch on nahi ho saki") }
+            }, ContextCompat.getMainExecutor(this))
         }
-        flashChip.text = listOf("⚡ Off", "⚡ Auto", "⚡ On", "🔦 Torch")[flashState]
-        setChipOn(flashChip, flashState != 0)
+        imageCapture?.flashMode =
+            if (flashState == 1) ImageCapture.FLASH_MODE_AUTO else ImageCapture.FLASH_MODE_OFF
+        iconFlash.setImageResource(
+            when (flashState) { 1 -> R.drawable.ic_flash_auto; 2 -> R.drawable.ic_flash_on; else -> R.drawable.ic_flash_off }
+        )
+        lblFlash.text = listOf("Off", "Auto", "On")[flashState]
+        tint(iconFlash, lblFlash, flashState != 0)
     }
 
-    // ---------------------------------------------------------------- pro panel (EV / ISO / WB)
+    // ---------------------------------------------------------------- pro panel (WB / ISO / EV)
     private fun setupProPanel() {
-        buildChips(isoRow, isoVals.map { if (it == 0) "Auto" else it.toString() }, { isoIdx }) {
-            isoIdx = it; applyCam2()
+        refreshIso = buildChips(isoRow, isoVals.map { if (it == 0) "Auto" else it.toString() }, { isoIdx }) {
+            isoIdx = it; updateProTabs(); applyCam2()
         }
-        buildChips(wbRow, wbNames, { wbIdx }) { wbIdx = it; applyCam2() }
+        refreshWb = buildChips(wbRow, wbNames, { wbIdx }) { wbIdx = it; updateProTabs(); applyCam2() }
         evSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                 val r = evRange ?: return
                 if (!fromUser) return
                 val idx = r.lower + p
                 camera?.cameraControl?.setExposureCompensationIndex(idx)
-                evLabel.text = String.format(Locale.US, "Exposure: %+.1f", idx * evStep)
+                curEv = idx * evStep
+                evLabel.text = String.format(Locale.US, "Exposure: %+.1f", curEv)
+                updateProTabs()
             }
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {}
         })
     }
 
-    private fun buildChips(row: LinearLayout, labels: List<String>, selected: () -> Int, onPick: (Int) -> Unit) {
+    private fun showProTab(i: Int) {
+        proTab = i
+        wbScroll.visibility = if (i == 0) View.VISIBLE else View.GONE
+        isoScroll.visibility = if (i == 1) View.VISIBLE else View.GONE
+        evBox.visibility = if (i == 2) View.VISIBLE else View.GONE
+        listOf(tabWb, tabIso, tabEv).forEachIndexed { k, t -> t.setTextColor(if (k == i) yellow else Color.WHITE) }
+    }
+
+    private fun updateProTabs() {
+        tabWb.text = "WB · ${wbNames[wbIdx]}"
+        tabIso.text = "ISO · " + (if (isoIdx == 0) "Auto" else isoVals[isoIdx].toString())
+        tabEv.text = String.format(Locale.US, "EV · %+.1f", curEv)
+    }
+
+    private fun buildChips(row: LinearLayout, labels: List<String>, selected: () -> Int, onPick: (Int) -> Unit): () -> Unit {
         row.removeAllViews()
         val views = labels.map { l ->
             TextView(this).apply {
@@ -447,14 +575,16 @@ class MainActivity : AppCompatActivity() {
                 ).apply { marginEnd = dp(6) }
             }
         }
-        fun refresh() = views.forEachIndexed { i, v -> setChipOn(v, i == selected()) }
+        val refresh: () -> Unit = { views.forEachIndexed { i, v -> setChipOn(v, i == selected()) } }
         views.forEachIndexed { i, v -> v.setOnClickListener { onPick(i); refresh() } }
         views.forEach { row.addView(it) }
         refresh()
+        return refresh
     }
 
     private fun setupExposure() {
         val st = camera?.cameraInfo?.exposureState
+        curEv = 0f
         if (st != null && st.isExposureCompensationSupported) {
             val r = st.exposureCompensationRange
             evRange = r
@@ -468,11 +598,19 @@ class MainActivity : AppCompatActivity() {
             evSeek.isEnabled = false
             evLabel.text = "Exposure: (is camera mein nahi)"
         }
+        updateProTabs()
     }
 
+    // Camera2 options only when ISO/WB is changed, so default photo/zoom/torch are never touched
     private fun applyCam2() {
         val cam = camera ?: return
+        val isDefault = isoIdx == 0 && wbIdx == 0
         try {
+            val ctl = Camera2CameraControl.from(cam.cameraControl)
+            if (isDefault) {
+                if (cam2Applied) { ctl.clearCaptureRequestOptions(); cam2Applied = false }
+                return
+            }
             val b = CaptureRequestOptions.Builder()
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, wbModes[wbIdx])
             if (isoIdx > 0) {
@@ -483,7 +621,8 @@ class MainActivity : AppCompatActivity() {
                 b.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
                 b.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, 16_666_666L)
             }
-            Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(b.build())
+            ctl.setCaptureRequestOptions(b.build())
+            cam2Applied = true
         } catch (e: Exception) {
             toast("ISO/WB is phone mein support nahi")
         }
@@ -494,13 +633,17 @@ class MainActivity : AppCompatActivity() {
         val items = arrayOf(
             "Photo size: ${photoSizes[photoSizeIdx]}",
             "Photo quality: ${jpegNames[jpegIdx]}",
-            "Video quality: ${videoNames[videoIdx]}"
+            "Video quality: ${videoNames[videoIdx]}",
+            "About (version)"
         )
-        AlertDialog.Builder(this).setTitle("Settings").setItems(items) { _, which ->
+        AlertDialog.Builder(this).setTitle("MS Camera Settings").setItems(items) { _, which ->
             when (which) {
                 0 -> pick("Photo size", photoSizes, photoSizeIdx) { photoSizeIdx = it; prefs.edit().putInt("psize", it).apply(); bindUseCases() }
                 1 -> pick("Photo quality", jpegNames, jpegIdx) { jpegIdx = it; prefs.edit().putInt("jpeg", it).apply() }
                 2 -> pick("Video quality", videoNames, videoIdx) { videoIdx = it; prefs.edit().putInt("video", it).apply(); bindUseCases() }
+                3 -> AlertDialog.Builder(this).setTitle("MS Camera")
+                    .setMessage("Version 3\nZoom: pinch ya 1x/2x/4x\nTorch: upar Flash button (Off → Auto → On)")
+                    .setPositiveButton("OK", null).show()
             }
         }.show()
     }
@@ -610,6 +753,7 @@ class MainActivity : AppCompatActivity() {
         flipBtn.alpha = if (on) 0.4f else 1f
         photoTab.alpha = if (on) 0.4f else 1f
         videoTab.alpha = if (on) 0.4f else 1f
+        proModeTab.alpha = if (on) 0.4f else 1f
     }
 
     // ---------------------------------------------------------------- address + map
