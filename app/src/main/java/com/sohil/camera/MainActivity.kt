@@ -1,11 +1,13 @@
 package com.sohil.camera
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
+import android.media.MediaMetadataRetriever
 import android.location.Geocoder
 import android.location.Location
 import android.net.Uri
@@ -22,6 +24,15 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.*
+import androidx.camera.core.Camera
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
@@ -59,6 +70,21 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var busy = false
     private var lastUri: Uri? = null
     private var saving = false
+    private var lastMime = "image/jpeg"
+
+    private var provider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
+    private var lensFacing = CameraSelector.LENS_FACING_BACK
+    private var videoMode = false
+    private var torchOn = false
+    private lateinit var torchBtn: TextView
+    private lateinit var flipBtn: TextView
+    private lateinit var recTimer: TextView
+    private lateinit var photoTab: TextView
+    private lateinit var videoTab: TextView
+    private lateinit var captureBtn: View
 
     private val locCallback = object : LocationCallback() {
         override fun onLocationResult(r: LocationResult) {
@@ -77,34 +103,52 @@ class MainActivity : AppCompatActivity() {
         thumb = findViewById(R.id.thumb)
         fused = LocationServices.getFusedLocationProviderClient(this)
 
-        findViewById<View>(R.id.captureBtn).setOnClickListener { v ->
+        torchBtn = findViewById(R.id.torchBtn)
+        flipBtn = findViewById(R.id.flipBtn)
+        recTimer = findViewById(R.id.recTimer)
+        photoTab = findViewById(R.id.photoTab)
+        videoTab = findViewById(R.id.videoTab)
+        captureBtn = findViewById(R.id.captureBtn)
+
+        captureBtn.setOnClickListener { v ->
             v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80).withEndAction {
                 v.animate().scaleX(1f).scaleY(1f).setDuration(80).start()
             }.start()
-            takePhoto()
+            if (videoMode) toggleRecording() else takePhoto()
         }
+        torchBtn.setOnClickListener { toggleTorch() }
+        flipBtn.setOnClickListener { flipCamera() }
+        photoTab.setOnClickListener { setMode(false) }
+        videoTab.setOnClickListener { setMode(true) }
         thumb.setOnClickListener {
             val u = lastUri ?: return@setOnClickListener
             try {
-                startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(u, "image/jpeg")
+                startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(u, lastMime)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
             } catch (_: Exception) {
                 Toast.makeText(this, "Gallery nahi khuli", Toast.LENGTH_SHORT).show()
             }
         }
 
-        if (allGranted()) startAll() else ActivityCompat.requestPermissions(this, neededPerms(), 10)
+        if (allGranted()) startAll() else ActivityCompat.requestPermissions(this, askPerms(), 10)
     }
 
-    private fun neededPerms(): Array<String> {
-        val l = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION)
+    private fun askPerms(): Array<String> {
+        val l = mutableListOf(
+            Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.RECORD_AUDIO
+        )
         if (Build.VERSION.SDK_INT <= 28) l.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         return l.toTypedArray()
     }
 
-    private fun allGranted() = neededPerms().all {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun has(p: String) =
+        ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    // mic optional: video still records (without sound) if denied
+    private fun allGranted() = has(Manifest.permission.CAMERA) &&
+        has(Manifest.permission.ACCESS_FINE_LOCATION) &&
+        (Build.VERSION.SDK_INT > 28 || has(Manifest.permission.WRITE_EXTERNAL_STORAGE))
 
     override fun onRequestPermissionsResult(c: Int, p: Array<out String>, r: IntArray) {
         super.onRequestPermissionsResult(c, p, r)
@@ -123,12 +167,117 @@ class MainActivity : AppCompatActivity() {
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
-            val provider = future.get()
-            val pv = Preview.Builder().build().also { it.setSurfaceProvider(preview.surfaceProvider) }
-            imageCapture = ImageCapture.Builder().build()
-            provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, imageCapture)
+            provider = future.get()
+            bindUseCases()
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun bindUseCases() {
+        val p = provider ?: return
+        val pv = Preview.Builder().build().also { it.setSurfaceProvider(preview.surfaceProvider) }
+        val sel = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+        p.unbindAll()
+        try {
+            camera = if (videoMode) {
+                val rec = Recorder.Builder().setQualitySelector(
+                    QualitySelector.from(Quality.HD, FallbackStrategy.lowerQualityOrHigherThan(Quality.SD))
+                ).build()
+                val vc = VideoCapture.withOutput(rec)
+                videoCapture = vc
+                p.bindToLifecycle(this, sel, pv, vc)
+            } else {
+                val ic = ImageCapture.Builder().build()
+                imageCapture = ic
+                p.bindToLifecycle(this, sel, pv, ic)
+            }
+            if (torchOn && camera?.cameraInfo?.hasFlashUnit() == true) {
+                camera?.cameraControl?.enableTorch(true)
+            } else torchOn = false
+            updateTorchUi()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Camera nahi khuli: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun updateTorchUi() {
+        torchBtn.setBackgroundResource(if (torchOn) R.drawable.round_btn_on else R.drawable.round_btn)
+    }
+
+    private fun toggleTorch() {
+        val cam = camera ?: return
+        if (!cam.cameraInfo.hasFlashUnit()) {
+            Toast.makeText(this, "Is camera mein torch nahi hai", Toast.LENGTH_SHORT).show()
+            return
+        }
+        torchOn = !torchOn
+        cam.cameraControl.enableTorch(torchOn)
+        updateTorchUi()
+    }
+
+    private fun flipCamera() {
+        if (recording != null) return
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
+            CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        if (lensFacing == CameraSelector.LENS_FACING_FRONT) torchOn = false
+        bindUseCases()
+    }
+
+    private fun setMode(video: Boolean) {
+        if (recording != null || video == videoMode) return
+        videoMode = video
+        photoTab.setTextColor(if (video) Color.WHITE else Color.parseColor("#FFC107"))
+        videoTab.setTextColor(if (video) Color.parseColor("#FFC107") else Color.WHITE)
+        captureBtn.setBackgroundResource(if (video) R.drawable.capture_video else R.drawable.capture_button)
+        bindUseCases()
+    }
+
+    // ---------- video ----------
+    @SuppressLint("MissingPermission")
+    private fun toggleRecording() {
+        val running = recording
+        if (running != null) { running.stop(); return }
+        val vc = videoCapture ?: return
+        val name = "MS_VID_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+        val cv = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, name)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= 29)
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/MS Camera")
+        }
+        val opts = MediaStoreOutputOptions.Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            .setContentValues(cv).build()
+        var pr = vc.output.prepareRecording(this, opts)
+        if (has(Manifest.permission.RECORD_AUDIO)) pr = pr.withAudioEnabled()
+        recording = pr.start(ContextCompat.getMainExecutor(this)) { ev ->
+            when (ev) {
+                is VideoRecordEvent.Start -> setRecordingUi(true)
+                is VideoRecordEvent.Status -> {
+                    val sec = ev.recordingStats.recordedDurationNanos / 1_000_000_000L
+                    recTimer.text = String.format(Locale.US, "%02d:%02d", sec / 60, sec % 60)
+                }
+                is VideoRecordEvent.Finalize -> {
+                    recording = null
+                    setRecordingUi(false)
+                    if (!ev.hasError()) {
+                        val u = ev.outputResults.outputUri
+                        io.execute { showVideoThumb(u) }
+                        Toast.makeText(this, "Video save ho gayi: Movies/MS Camera", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Video error: ${ev.error}", Toast.LENGTH_LONG).show()
+                    }
+                }
+                else -> {}
+            }
+        }
+    }
+
+    private fun setRecordingUi(on: Boolean) {
+        recTimer.visibility = if (on) View.VISIBLE else View.GONE
+        if (on) recTimer.text = "00:00"
+        captureBtn.setBackgroundResource(if (on) R.drawable.capture_stop else R.drawable.capture_video)
+        flipBtn.alpha = if (on) 0.4f else 1f
+        photoTab.alpha = if (on) 0.4f else 1f
+        videoTab.alpha = if (on) 0.4f else 1f
     }
 
     // ---------- address + map ----------
@@ -215,7 +364,7 @@ class MainActivity : AppCompatActivity() {
                         if (uri != null) {
                             showThumb(uri)
                             runOnUiThread {
-                                Toast.makeText(this@MainActivity, "Save ho gayi: Pictures/Sohil", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@MainActivity, "Save ho gayi: Pictures/MS Camera", Toast.LENGTH_SHORT).show()
                             }
                         }
                     } catch (e: Exception) {
@@ -308,12 +457,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun save(bmp: Bitmap): Uri? {
-        val name = "SOHIL_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
+        val name = "MS_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         val cv = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT >= 29)
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Sohil")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/MS Camera")
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv) ?: return null
         contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
@@ -321,26 +470,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- last photo thumbnail ----------
+    private fun latest(coll: Uri): Pair<Uri, Long>? {
+        val sel = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? OR ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
+        return contentResolver.query(
+            coll, arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED),
+            sel, arrayOf("MS_%", "SOHIL_%"), "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+        )?.use { cur ->
+            if (cur.moveToFirst()) Pair(ContentUris.withAppendedId(coll, cur.getLong(0)), cur.getLong(1)) else null
+        }
+    }
+
     private fun loadLastThumb() {
         io.execute {
             try {
-                contentResolver.query(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    arrayOf(MediaStore.Images.Media._ID),
-                    "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("SOHIL_%"),
-                    "${MediaStore.Images.Media.DATE_ADDED} DESC"
-                )?.use { cur ->
-                    if (cur.moveToFirst()) {
-                        showThumb(ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cur.getLong(0)))
-                    }
-                }
+                val img = latest(MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                val vid = latest(MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+                if (vid != null && (img == null || vid.second > img.second)) showVideoThumb(vid.first)
+                else if (img != null) showThumb(img.first)
             } catch (_: Exception) {}
         }
     }
 
+    private fun showVideoThumb(uri: Uri) {
+        val r = MediaMetadataRetriever()
+        try {
+            r.setDataSource(this, uri)
+            val f = r.getFrameAtTime(0) ?: return
+            runOnUiThread { thumb.setImageBitmap(f); lastUri = uri; lastMime = "video/mp4" }
+        } catch (_: Exception) {
+        } finally { r.release() }
+    }
+
     private fun showThumb(uri: Uri) {
         val bmp = decodeSampled(uri, 200) ?: return
-        runOnUiThread { thumb.setImageBitmap(bmp); lastUri = uri }
+        runOnUiThread { thumb.setImageBitmap(bmp); lastUri = uri; lastMime = "image/jpeg" }
     }
 
     private fun decodeSampled(uri: Uri, target: Int): Bitmap? {
