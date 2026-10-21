@@ -2,20 +2,27 @@ package com.sohil.camera
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
+import android.graphics.drawable.ColorDrawable
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.location.Geocoder
 import android.location.Location
+import android.media.MediaActionSound
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
 import android.text.Layout
@@ -28,8 +35,11 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
@@ -39,12 +49,14 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.*
 import androidx.camera.core.Camera
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.effects.OverlayEffect
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -57,6 +69,7 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.location.*
 import java.net.HttpURLConnection
 import java.net.URL
@@ -73,7 +86,8 @@ import kotlin.math.tan
 
 class MainActivity : AppCompatActivity() {
 
-    // views
+    // ---------- views
+    private lateinit var previewBox: FrameLayout
     private lateinit var preview: PreviewView
     private lateinit var locText: TextView
     private lateinit var thumb: ImageView
@@ -114,20 +128,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var isoRow: LinearLayout
     private lateinit var wbRow: LinearLayout
 
-    // camera
+    // ---------- camera
     private lateinit var fused: FusedLocationProviderClient
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
+    private val fxThread = HandlerThread("ms_fx").apply { start() }
+    private val fxHandler by lazy { Handler(fxThread.looper) }
+    private val sound = MediaActionSound()
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
+    private var overlayEffect: OverlayEffect? = null
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var videoMode = false
     private var saving = false
+    @Volatile private var videoRot = 90
+    @Volatile private var awbResult = -1
 
-    // options
+    // ---------- options
     private var flashState = 0                  // 0 off, 1 auto, 2 torch (always on)
     private var uiMode = 0                      // 0 photo, 1 video, 2 pro
     private var proTab = 0
@@ -157,20 +177,36 @@ class MainActivity : AppCompatActivity() {
         CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT, CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT,
         CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT
     )
+    // software fallback gains (R, G, B) when the phone ignores hardware white balance
+    private val wbGains = listOf(
+        floatArrayOf(1f, 1f, 1f), floatArrayOf(1.06f, 1f, 0.94f), floatArrayOf(1.14f, 1f, 0.86f),
+        floatArrayOf(0.92f, 1f, 1.12f), floatArrayOf(0.80f, 1f, 1.30f)
+    )
     private var evRange: Range<Int>? = null
     private var evStep = 0f
     private var countdownRunnable: Runnable? = null
 
-    // saved settings
+    // ---------- saved settings
     private val prefs by lazy { getSharedPreferences("ms_camera", MODE_PRIVATE) }
-    private val photoSizes = listOf("High (12 MP)", "Medium (5 MP)", "Low (2 MP)")
-    private val photoSizeVals = listOf(Size(4000, 3000), Size(2560, 1920), Size(1600, 1200))
-    private val jpegNames = listOf("Best (95%)", "Good (85%)", "Small (70%)")
+    private var photoSizeIdx = 0
+    private var jpegIdx = 0
+    private var videoIdx = 1
+    private var aspectIdx = 1                   // 0 = 1:1, 1 = 4:3, 2 = 16:9, 3 = Full
+    private var shutterSound = true
+    private var mirrorSelfie = true
+    private var locTags = true
+    private var volAction = 0                   // 0 shutter, 1 zoom, 2 off
+    private var stampPhoto = true
+    private var stampMap = true
+    private var stampVideo = true
+    private var recAudio = true
+    private var prefsReady = false
+    private val sizes43 = listOf(Size(4000, 3000), Size(2560, 1920), Size(1600, 1200))
+    private val sizes169 = listOf(Size(3840, 2160), Size(2560, 1440), Size(1920, 1080))
     private val jpegVals = listOf(95, 85, 70)
-    private val videoNames = listOf("4K (UHD)", "Full HD 1080p", "HD 720p", "SD 480p")
     private val videoVals = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
 
-    // location / address / map
+    // ---------- location / address / map
     @Volatile private var lastLocation: Location? = null
     @Volatile private var addrTitle: String? = null
     @Volatile private var addrFull: String? = null
@@ -183,6 +219,12 @@ class MainActivity : AppCompatActivity() {
     private var lastUri: Uri? = null
     private var lastMime = "image/jpeg"
 
+    // video stamp cache
+    private var stampKey = ""
+    private var stampBmp: Bitmap? = null
+
+    private val yellow = Color.parseColor("#FFC107")
+
     private val locCallback = object : LocationCallback() {
         override fun onLocationResult(r: LocationResult) {
             val l = r.lastLocation ?: return
@@ -193,13 +235,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
-    // ---------------------------------------------------------------- lifecycle
+    // ================================================================ lifecycle
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        previewBox = findViewById(R.id.previewBox)
         preview = findViewById(R.id.preview)
-        preview.scaleType = PreviewView.ScaleType.FIT_CENTER
+        preview.scaleType = PreviewView.ScaleType.FILL_CENTER
         locText = findViewById(R.id.locText)
         thumb = findViewById(R.id.thumb)
         btnTimer = findViewById(R.id.btnTimer)
@@ -237,9 +281,8 @@ class MainActivity : AppCompatActivity() {
         isoRow = findViewById(R.id.isoRow)
         wbRow = findViewById(R.id.wbRow)
 
-        photoSizeIdx = prefs.getInt("psize", 0)
-        jpegIdx = prefs.getInt("jpeg", 0)
-        videoIdx = prefs.getInt("video", 1)
+        loadPrefs()
+        prefsReady = true
 
         captureBtn.setOnClickListener { v ->
             v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80).withEndAction {
@@ -251,25 +294,11 @@ class MainActivity : AppCompatActivity() {
         photoTab.setOnClickListener { setMode(0) }
         videoTab.setOnClickListener { setMode(1) }
         proModeTab.setOnClickListener { setMode(2) }
-        findViewById<View>(R.id.btnMenu).setOnClickListener { showSettings() }
+        findViewById<View>(R.id.btnMenu).setOnClickListener { showMenuSheet() }
         btnFlash.setOnClickListener { cycleFlash() }
-        btnTimer.setOnClickListener {
-            timerIdx = (timerIdx + 1) % timerOpts.size
-            lblTimer.text = if (timerOpts[timerIdx] == 0) "Off" else "${timerOpts[timerIdx]}s"
-            tint(iconTimer, lblTimer, timerIdx != 0)
-        }
-        btnBurst.setOnClickListener {
-            if (videoMode) { toast("Burst sirf photo mode mein"); return@setOnClickListener }
-            burstIdx = (burstIdx + 1) % burstOpts.size
-            lblBurst.text = "${burstOpts[burstIdx]}x"
-            tint(iconBurst, lblBurst, burstIdx != 0)
-        }
-        btnGrid.setOnClickListener {
-            gridOn = !gridOn
-            grid.visibility = if (gridOn) View.VISIBLE else View.GONE
-            lblGrid.text = if (gridOn) "On" else "Off"
-            tint(iconGrid, lblGrid, gridOn)
-        }
+        btnTimer.setOnClickListener { timerIdx = (timerIdx + 1) % timerOpts.size; updateTimerUi() }
+        btnBurst.setOnClickListener { cycleBurst() }
+        btnGrid.setOnClickListener { gridOn = !gridOn; updateGridUi() }
         thumb.setOnClickListener {
             val u = lastUri ?: return@setOnClickListener
             try {
@@ -283,35 +312,153 @@ class MainActivity : AppCompatActivity() {
         tabWb.setOnClickListener { showProTab(0) }
         tabIso.setOnClickListener { showProTab(1) }
         tabEv.setOnClickListener { showProTab(2) }
+        previewBox.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, orr, ob ->
+            if (r - l != orr - ol || b - t != ob - ot) applyAspect()
+        }
 
         setupGestures()
         setupProPanel()
         showProTab(0)
         updateModeTabs()
         updateZoomUi()
+        updateTimerUi(); updateGridUi(); updateBurstUi()
 
         if (allGranted()) startAll() else ActivityCompat.requestPermissions(this, askPerms(), 10)
     }
 
-    private val yellow = Color.parseColor("#FFC107")
+    private fun loadPrefs() {
+        photoSizeIdx = prefs.getInt("psize", 0).coerceIn(0, 2)
+        jpegIdx = prefs.getInt("jpeg", 0).coerceIn(0, 2)
+        videoIdx = prefs.getInt("video", 1).coerceIn(0, 3)
+        aspectIdx = prefs.getInt("aspect", 1).coerceIn(0, 3)
+        shutterSound = prefs.getBoolean("shutter_sound", true)
+        mirrorSelfie = prefs.getBoolean("mirror_selfie", true)
+        locTags = prefs.getBoolean("loc_tags", true)
+        volAction = prefs.getInt("vol_action", 0)
+        stampPhoto = prefs.getBoolean("stamp_photo", true)
+        stampMap = prefs.getBoolean("stamp_map", true)
+        stampVideo = prefs.getBoolean("stamp_video", true)
+        recAudio = prefs.getBoolean("rec_audio", true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!prefsReady) return
+        val before = "$photoSizeIdx|$videoIdx|$stampVideo"
+        loadPrefs()
+        if (provider != null && recording == null && before != "$photoSizeIdx|$videoIdx|$stampVideo") bindUseCases()
+    }
 
     private fun tint(icon: ImageView, label: TextView, on: Boolean) {
         icon.setColorFilter(if (on) yellow else Color.WHITE)
         label.setTextColor(if (on) yellow else Color.WHITE)
     }
 
-    private var photoSizeIdx = 0
-    private var jpegIdx = 0
-    private var videoIdx = 1
+    private fun updateTimerUi() {
+        lblTimer.text = if (timerOpts[timerIdx] == 0) "Off" else "${timerOpts[timerIdx]}s"
+        tint(iconTimer, lblTimer, timerIdx != 0)
+    }
 
-    private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
+    private fun updateGridUi() {
+        grid.visibility = if (gridOn) View.VISIBLE else View.GONE
+        lblGrid.text = if (gridOn) "On" else "Off"
+        tint(iconGrid, lblGrid, gridOn)
+    }
+
+    private fun updateBurstUi() {
+        lblBurst.text = "${burstOpts[burstIdx]}x"
+        tint(iconBurst, lblBurst, burstIdx != 0)
+    }
+
+    private fun cycleBurst() {
+        if (videoMode) { toast("Burst sirf photo mode mein"); return }
+        burstIdx = (burstIdx + 1) % burstOpts.size
+        updateBurstUi()
+    }
 
     private fun setChipOn(tv: TextView, on: Boolean) {
         tv.setBackgroundResource(if (on) R.drawable.chip_bg_on else R.drawable.chip_bg)
         tv.setTextColor(if (on) Color.BLACK else Color.WHITE)
     }
 
-    // ---------------------------------------------------------------- permissions
+    // ================================================================ menu sheet (top)
+    private fun segmented(row: LinearLayout, labels: List<String>, sel: Int, onPick: (Int) -> Unit) {
+        row.removeAllViews()
+        val tvs = labels.map { l ->
+            TextView(this).apply {
+                text = l; gravity = Gravity.CENTER; textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            }
+        }
+        fun paint(s: Int) = tvs.forEachIndexed { i, t -> t.setTextColor(if (i == s) yellow else Color.WHITE) }
+        tvs.forEachIndexed { i, t -> t.setOnClickListener { paint(i); onPick(i) }; row.addView(t) }
+        paint(sel)
+    }
+
+    private fun showMenuSheet() {
+        val v = layoutInflater.inflate(R.layout.sheet_menu, null)
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dlg.setContentView(v)
+        dlg.window?.apply {
+            setGravity(Gravity.TOP)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        }
+        v.findViewById<View>(R.id.menuClose).setOnClickListener { dlg.dismiss() }
+        segmented(v.findViewById(R.id.aspectRow), listOf("1:1", "4:3", "16:9", "Full"), aspectIdx) {
+            aspectIdx = it
+            prefs.edit().putInt("aspect", it).apply()
+            if (videoMode) toast("Video hamesha 16:9 mein hoti hai")
+            applyAspect()
+            if (recording == null) bindUseCases()
+        }
+        segmented(v.findViewById(R.id.timerRow), listOf("Timer: Off", "3 s", "5 s", "10 s"), timerIdx) {
+            timerIdx = it; updateTimerUi()
+        }
+        val gridIcon = v.findViewById<ImageView>(R.id.tileGridIcon)
+        val gridLbl = v.findViewById<TextView>(R.id.tileGridLbl)
+        val burstIcon = v.findViewById<ImageView>(R.id.tileBurstIcon)
+        val burstLbl = v.findViewById<TextView>(R.id.tileBurstLbl)
+        fun refreshTiles() {
+            tint(gridIcon, gridLbl, gridOn); gridLbl.text = if (gridOn) "Grid: On" else "Grid: Off"
+            tint(burstIcon, burstLbl, burstIdx != 0); burstLbl.text = "Burst: ${burstOpts[burstIdx]}x"
+        }
+        refreshTiles()
+        v.findViewById<View>(R.id.tileGrid).setOnClickListener { gridOn = !gridOn; updateGridUi(); refreshTiles() }
+        v.findViewById<View>(R.id.tileBurst).setOnClickListener { cycleBurst(); refreshTiles() }
+        v.findViewById<View>(R.id.tileSettings).setOnClickListener {
+            dlg.dismiss(); startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        dlg.show()
+    }
+
+    // ================================================================ aspect ratio
+    private fun targetAspect(): Float {
+        if (videoMode) return 9f / 16f
+        return when (aspectIdx) {
+            0 -> 1f
+            1 -> 3f / 4f
+            2 -> 9f / 16f
+            else -> {
+                val bw = previewBox.width.toFloat(); val bh = previewBox.height.toFloat()
+                if (bw > 0 && bh > 0) bw / bh else 9f / 16f
+            }
+        }
+    }
+
+    private fun applyAspect() {
+        val bw = previewBox.width; val bh = previewBox.height
+        if (bw == 0 || bh == 0) return
+        val a = targetAspect()
+        var w = bw; var h = (bw / a).toInt()
+        if (h > bh) { h = bh; w = (bh * a).toInt() }
+        preview.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+        grid.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+    }
+
+    // ================================================================ permissions
     private fun askPerms(): Array<String> {
         val l = mutableListOf(
             Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION,
@@ -338,12 +485,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun startLocation() {
         val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000).build()
-        try { fused = LocationServices.getFusedLocationProviderClient(this)
-            fused.requestLocationUpdates(req, locCallback, Looper.getMainLooper()) }
-        catch (_: SecurityException) {}
+        try {
+            fused = LocationServices.getFusedLocationProviderClient(this)
+            fused.requestLocationUpdates(req, locCallback, Looper.getMainLooper())
+        } catch (_: SecurityException) {}
     }
 
-    // ---------------------------------------------------------------- gestures / zoom / focus
+    // ================================================================ gestures / zoom / focus
     @SuppressLint("ClickableViewAccessibility")
     private fun setupGestures() {
         val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -366,10 +514,7 @@ class MainActivity : AppCompatActivity() {
     private fun setZoom(r: Float, popup: Boolean) {
         val z = r.coerceIn(minZoom, max(minZoom, maxZoom))
         curZoom = z
-        val cam = camera
-        if (cam != null) {
-            try { cam.cameraControl.setZoomRatio(z) } catch (_: Exception) {}
-        }
+        try { camera?.cameraControl?.setZoomRatio(z) } catch (_: Exception) {}
         updateZoomUi()
         if (popup) showZoomPopup()
     }
@@ -397,8 +542,8 @@ class MainActivity : AppCompatActivity() {
                 .setAutoCancelDuration(4, TimeUnit.SECONDS).build()
             cam.cameraControl.startFocusAndMetering(action)
         } catch (_: Exception) {}
-        focusRing.x = x - focusRing.width / 2f
-        focusRing.y = y - focusRing.height / 2f
+        focusRing.x = preview.left + x - focusRing.width / 2f
+        focusRing.y = preview.top + y - focusRing.height / 2f
         focusRing.animate().cancel()
         focusRing.alpha = 1f
         focusRing.scaleX = 1.3f; focusRing.scaleY = 1.3f
@@ -410,7 +555,7 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    // ---------------------------------------------------------------- camera binding
+    // ================================================================ camera binding
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -419,25 +564,54 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    private val awbCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult
+        ) {
+            awbResult = result.get(CaptureResult.CONTROL_AWB_MODE) ?: -1
+        }
+    }
+
     private fun bindUseCases() {
         val p = provider ?: return
-        val pv = Preview.Builder().build().also { it.setSurfaceProvider(preview.surfaceProvider) }
+        applyAspect()
+        val wide = videoMode || targetAspect() < 0.66f      // 16:9 capture for tall/Full/16:9
+        val ratio = if (wide) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                    else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+        val pb = Preview.Builder()
+            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
+        Camera2Interop.Extender(pb).setSessionCaptureCallback(awbCallback)
+        val pv = pb.build().also { it.setSurfaceProvider(preview.surfaceProvider) }
         val sel = CameraSelector.Builder().requireLensFacing(lensFacing).build()
         p.unbindAll()
+        overlayEffect?.close(); overlayEffect = null
         try {
-            camera = if (videoMode) {
+            if (videoMode) {
                 val rec = Recorder.Builder().setQualitySelector(
                     QualitySelector.from(videoVals[videoIdx], FallbackStrategy.lowerQualityOrHigherThan(Quality.SD))
                 ).build()
                 val vc = VideoCapture.withOutput(rec)
                 videoCapture = vc
-                p.bindToLifecycle(this, sel, pv, vc)
+                var bound: Camera? = null
+                if (stampVideo) {
+                    val fx = makeOverlay()
+                    try {
+                        val group = UseCaseGroup.Builder().addUseCase(pv).addUseCase(vc).addEffect(fx).build()
+                        bound = p.bindToLifecycle(this, sel, group)
+                        overlayEffect = fx
+                    } catch (e: Exception) {
+                        fx.close()
+                        p.unbindAll()
+                        toast("Is phone par video stamp nahi chal raha")
+                    }
+                }
+                camera = bound ?: p.bindToLifecycle(this, sel, pv, vc)
             } else {
+                val sz = if (wide) sizes169[photoSizeIdx] else sizes43[photoSizeIdx]
                 val rs = ResolutionSelector.Builder()
-                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                    .setResolutionStrategy(
-                        ResolutionStrategy(photoSizeVals[photoSizeIdx], ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
-                    ).build()
+                    .setAspectRatioStrategy(ratio)
+                    .setResolutionStrategy(ResolutionStrategy(sz, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                    .build()
                 val ic = ImageCapture.Builder()
                     .setCaptureMode(
                         if (photoSizeIdx == 0) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
@@ -445,18 +619,19 @@ class MainActivity : AppCompatActivity() {
                     )
                     .setResolutionSelector(rs).build()
                 imageCapture = ic
-                p.bindToLifecycle(this, sel, pv, ic)
+                camera = p.bindToLifecycle(this, sel, pv, ic)
             }
             val cam = camera!!
-            // zoom limits (observe so the value is always available)
+            videoRot = try { cam.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0) } catch (_: Exception) { 90 }
             zoomLive?.removeObserver(zoomObs)
             zoomLive = cam.cameraInfo.zoomState
             zoomLive?.observe(this, zoomObs)
             cam.cameraInfo.zoomState.value?.let { minZoom = it.minZoomRatio; maxZoom = it.maxZoomRatio }
             curZoom = 1f
             updateZoomUi()
-            if (cam.cameraInfo.hasFlashUnit() != true) flashState = 0
+            if (!cam.cameraInfo.hasFlashUnit()) flashState = 0
             cam2Applied = false
+            awbResult = -1
             applyFlash()
             setupExposure()
             applyCam2()
@@ -472,7 +647,7 @@ class MainActivity : AppCompatActivity() {
         bindUseCases()
     }
 
-    // ---------------------------------------------------------------- modes
+    // ================================================================ modes
     private fun setMode(m: Int) {
         if (recording != null || m == uiMode) return
         val wasVideo = videoMode
@@ -503,7 +678,7 @@ class MainActivity : AppCompatActivity() {
         applyCam2()
     }
 
-    // ---------------------------------------------------------------- flash / torch
+    // ================================================================ flash / torch
     private fun cycleFlash() {
         if (camera?.cameraInfo?.hasFlashUnit() != true) { toast("Is camera mein flash/torch nahi hai"); return }
         flashState = if (videoMode) (if (flashState == 2) 0 else 2) else (flashState + 1) % 3
@@ -529,12 +704,14 @@ class MainActivity : AppCompatActivity() {
         tint(iconFlash, lblFlash, flashState != 0)
     }
 
-    // ---------------------------------------------------------------- pro panel (WB / ISO / EV)
+    // ================================================================ pro panel (WB / ISO / EV)
     private fun setupProPanel() {
         refreshIso = buildChips(isoRow, isoVals.map { if (it == 0) "Auto" else it.toString() }, { isoIdx }) {
             isoIdx = it; updateProTabs(); applyCam2()
         }
-        refreshWb = buildChips(wbRow, wbNames, { wbIdx }) { wbIdx = it; updateProTabs(); applyCam2() }
+        refreshWb = buildChips(wbRow, wbNames, { wbIdx }) {
+            wbIdx = it; updateProTabs(); applyCam2(); checkWbLater()
+        }
         evSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                 val r = evRange ?: return
@@ -548,6 +725,15 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {}
         })
+    }
+
+    // if the phone's camera ignores hardware WB, tell the user it is applied in software on photos
+    private fun checkWbLater() {
+        if (wbIdx == 0) return
+        handler.postDelayed({
+            if (wbIdx != 0 && awbResult != wbModes[wbIdx])
+                toast("WB is phone mein live nahi badalta, photo par software se lagega")
+        }, 1500)
     }
 
     private fun showProTab(i: Int) {
@@ -612,6 +798,8 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val b = CaptureRequestOptions.Builder()
+            b.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+            b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, false)
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, wbModes[wbIdx])
             if (isoIdx > 0) {
                 val range = Camera2CameraInfo.from(cam.cameraInfo)
@@ -624,36 +812,11 @@ class MainActivity : AppCompatActivity() {
             ctl.setCaptureRequestOptions(b.build())
             cam2Applied = true
         } catch (e: Exception) {
-            toast("ISO/WB is phone mein support nahi")
+            toast("ISO/WB hardware se nahi badal paya")
         }
     }
 
-    // ---------------------------------------------------------------- settings dialog
-    private fun showSettings() {
-        val items = arrayOf(
-            "Photo size: ${photoSizes[photoSizeIdx]}",
-            "Photo quality: ${jpegNames[jpegIdx]}",
-            "Video quality: ${videoNames[videoIdx]}",
-            "About (version)"
-        )
-        AlertDialog.Builder(this).setTitle("MS Camera Settings").setItems(items) { _, which ->
-            when (which) {
-                0 -> pick("Photo size", photoSizes, photoSizeIdx) { photoSizeIdx = it; prefs.edit().putInt("psize", it).apply(); bindUseCases() }
-                1 -> pick("Photo quality", jpegNames, jpegIdx) { jpegIdx = it; prefs.edit().putInt("jpeg", it).apply() }
-                2 -> pick("Video quality", videoNames, videoIdx) { videoIdx = it; prefs.edit().putInt("video", it).apply(); bindUseCases() }
-                3 -> AlertDialog.Builder(this).setTitle("MS Camera")
-                    .setMessage("Version 3\nZoom: pinch ya 1x/2x/4x\nTorch: upar Flash button (Off → Auto → On)")
-                    .setPositiveButton("OK", null).show()
-            }
-        }.show()
-    }
-
-    private fun pick(title: String, names: List<String>, cur: Int, onPick: (Int) -> Unit) {
-        AlertDialog.Builder(this).setTitle(title)
-            .setSingleChoiceItems(names.toTypedArray(), cur) { d, i -> onPick(i); d.dismiss() }.show()
-    }
-
-    // ---------------------------------------------------------------- shutter, timer, burst
+    // ================================================================ shutter, timer, burst
     private fun onShutter() {
         if (countdownRunnable != null) { cancelCountdown(); return }
         if (recording != null) { recording?.stop(); return }
@@ -697,18 +860,51 @@ class MainActivity : AppCompatActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-            if (event.repeatCount == 0) onShutter()
-            return true
+            when (volAction) {
+                0 -> { if (event.repeatCount == 0) onShutter(); return true }
+                1 -> {
+                    val step = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 0.5f else -0.5f
+                    setZoom(curZoom + step, true); return true
+                }
+            }
         }
         return super.onKeyDown(keyCode, event)
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) return true
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) && volAction != 2) return true
         return super.onKeyUp(keyCode, event)
     }
 
-    // ---------------------------------------------------------------- video
+    // ================================================================ video (with live stamp)
+    private fun makeOverlay(): OverlayEffect {
+        val fx = OverlayEffect(CameraEffect.VIDEO_CAPTURE, 0, fxHandler, androidx.core.util.Consumer<Throwable> { })
+        fx.setOnDrawListener { frame ->
+            val c = frame.overlayCanvas
+            c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            val loc = lastLocation
+            if (loc != null) {
+                val bw = c.width
+                val bh = c.height
+                val sec = System.currentTimeMillis() / 1000
+                val key = "$sec|$bw|$bh|${loc.latitude}|${loc.longitude}|$addrFull|${comp != null}|$videoRot"
+                if (key != stampKey || stampBmp == null) {
+                    val rot = videoRot
+                    val uw = if (rot % 180 == 0) bw else bh
+                    val uh = if (rot % 180 == 0) bh else bw
+                    val up = Bitmap.createBitmap(uw, uh, Bitmap.Config.ARGB_8888)
+                    drawStampPanel(Canvas(up), uw.toFloat(), uh.toFloat(), loc)
+                    val m = Matrix().apply { postRotate(-rot.toFloat()) }
+                    stampBmp = Bitmap.createBitmap(up, 0, 0, uw, uh, m, true)
+                    stampKey = key
+                }
+                stampBmp?.let { c.drawBitmap(it, 0f, 0f, null) }
+            }
+            true
+        }
+        return fx
+    }
+
     @SuppressLint("MissingPermission")
     private fun toggleRecording() {
         val vc = videoCapture ?: return
@@ -722,7 +918,7 @@ class MainActivity : AppCompatActivity() {
         val opts = MediaStoreOutputOptions.Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
             .setContentValues(cv).build()
         var pr = vc.output.prepareRecording(this, opts)
-        if (has(Manifest.permission.RECORD_AUDIO)) pr = pr.withAudioEnabled()
+        if (recAudio && has(Manifest.permission.RECORD_AUDIO)) pr = pr.withAudioEnabled()
         recording = pr.start(ContextCompat.getMainExecutor(this)) { ev ->
             when (ev) {
                 is VideoRecordEvent.Start -> setRecordingUi(true)
@@ -756,7 +952,7 @@ class MainActivity : AppCompatActivity() {
         proModeTab.alpha = if (on) 0.4f else 1f
     }
 
-    // ---------------------------------------------------------------- address + map
+    // ================================================================ address + map
     private fun updateLocText() {
         val l = lastLocation ?: return
         val sb = StringBuilder()
@@ -817,17 +1013,21 @@ class MainActivity : AppCompatActivity() {
         compKey = key
     }
 
-    // ---------------------------------------------------------------- photo
+    // ================================================================ photo
     private fun takePhoto(onDone: () -> Unit) {
         val ic = imageCapture
         val loc = lastLocation
         if (ic == null) { burstLeft = 0; onDone(); return }
-        if (loc == null) {
+        if (loc == null && stampPhoto) {
             toast("GPS location abhi nahi mili, thoda ruko")
             burstLeft = 0; onDone(); return
         }
         if (saving) { onDone(); return }
         saving = true
+        val aspect = targetAspect()
+        val front = lensFacing == CameraSelector.LENS_FACING_FRONT
+        val wbSoft = if (wbIdx != 0 && awbResult != wbModes[wbIdx]) wbIdx else 0
+        if (shutterSound) try { sound.play(MediaActionSound.SHUTTER_CLICK) } catch (_: Exception) {}
         ic.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
                 val bmp = image.toBitmap()
@@ -835,14 +1035,29 @@ class MainActivity : AppCompatActivity() {
                 image.close()
                 io.execute {
                     try {
-                        val m = Matrix().apply { postRotate(rot.toFloat()) }
-                        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                        val uri = save(stamp(rotated, loc))
+                        var b = bmp
+                        if (rot != 0) {
+                            val r = Bitmap.createBitmap(b, 0, 0, b.width, b.height,
+                                Matrix().apply { postRotate(rot.toFloat()) }, true)
+                            if (r !== b) b.recycle(); b = r
+                        }
+                        if (front && mirrorSelfie) {
+                            val r = Bitmap.createBitmap(b, 0, 0, b.width, b.height,
+                                Matrix().apply { postScale(-1f, 1f, b.width / 2f, b.height / 2f) }, true)
+                            if (r !== b) b.recycle(); b = r
+                        }
+                        b = cropAspect(b, aspect)
+                        if (wbSoft != 0) b = softWb(b, wbSoft)
+                        if (!b.isMutable) { val m = b.copy(Bitmap.Config.ARGB_8888, true); b.recycle(); b = m }
+                        if (stampPhoto && loc != null) drawStampPanel(Canvas(b), b.width.toFloat(), b.height.toFloat(), loc)
+                        val uri = save(b)
                         if (uri != null) {
+                            if (locTags && loc != null) writeExif(uri, loc)
                             showThumb(uri)
                             if (burstLeft == 0) runOnUiThread { toast("Save ho gayi: Pictures/MS Camera") }
                         }
-                    } catch (e: Exception) {
+                        b.recycle()
+                    } catch (e: Throwable) {
                         burstLeft = 0
                         runOnUiThread { Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show() }
                     } finally {
@@ -860,17 +1075,37 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun stamp(src: Bitmap, loc: Location): Bitmap {
-        val out = src.copy(Bitmap.Config.ARGB_8888, true)
-        val c = Canvas(out)
-        val w = out.width.toFloat()
-        val h = out.height.toFloat()
+    private fun cropAspect(src: Bitmap, a: Float): Bitmap {
+        val cur = src.width.toFloat() / src.height
+        if (abs(cur - a) < 0.01f) return src
+        val r = if (cur > a) {
+            val nw = (src.height * a).toInt()
+            Bitmap.createBitmap(src, (src.width - nw) / 2, 0, nw, src.height)
+        } else {
+            val nh = (src.width / a).toInt()
+            Bitmap.createBitmap(src, 0, (src.height - nh) / 2, src.width, nh)
+        }
+        if (r !== src) src.recycle()
+        return r
+    }
+
+    private fun softWb(src: Bitmap, idx: Int): Bitmap {
+        val g = wbGains[idx]
+        val cm = ColorMatrix().apply { setScale(g[0], g[1], g[2], 1f) }
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(src, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(cm) })
+        src.recycle()
+        return out
+    }
+
+    // draws the location panel (map + address + lat/long + date) at the bottom of a canvas w x h
+    private fun drawStampPanel(c: Canvas, w: Float, h: Float, loc: Location) {
         val margin = w * 0.03f
         val pad = w * 0.02f
         val gap = w * 0.008f
         val mapSize = w * 0.26f
 
-        val map = comp
+        val map = if (stampMap) comp else null
         val px = compPx
         val py = compPy
         val title = addrTitle
@@ -890,7 +1125,7 @@ class MainActivity : AppCompatActivity() {
         val now = Date()
         val off = TimeZone.getDefault().getOffset(now.time) / 60000
         val offStr = String.format(Locale.US, "%s%02d:%02d", if (off < 0) "-" else "+", abs(off) / 60, abs(off) % 60)
-        val dateStr = SimpleDateFormat("EEEE, dd/MM/yyyy hh:mm a", Locale.getDefault()).format(now) + " GMT " + offStr
+        val dateStr = SimpleDateFormat("EEEE, dd/MM/yyyy hh:mm:ss a", Locale.getDefault()).format(now) + " GMT " + offStr
 
         val parts = mutableListOf<StaticLayout>()
         if (!title.isNullOrBlank()) parts += lay(title, titleP)
@@ -930,7 +1165,6 @@ class MainActivity : AppCompatActivity() {
             c.save(); c.translate(textLeft, y); l.draw(c); c.restore()
             y += l.height + gap
         }
-        return out
     }
 
     private fun save(bmp: Bitmap): Uri? {
@@ -946,7 +1180,17 @@ class MainActivity : AppCompatActivity() {
         return uri
     }
 
-    // ---------------------------------------------------------------- last photo thumbnail
+    private fun writeExif(uri: Uri, loc: Location) {
+        try {
+            contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val ex = ExifInterface(pfd.fileDescriptor)
+                ex.setGpsInfo(loc)
+                ex.saveAttributes()
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ================================================================ last photo thumbnail
     private fun latest(coll: Uri): Pair<Uri, Long>? {
         val sel = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? OR ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
         return contentResolver.query(
@@ -995,6 +1239,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try { fused.removeLocationUpdates(locCallback) } catch (_: Exception) {}
+        overlayEffect?.close()
+        fxThread.quitSafely()
         io.shutdown()
+        sound.release()
     }
 }
