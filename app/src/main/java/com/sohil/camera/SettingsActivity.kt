@@ -1,5 +1,6 @@
 package com.sohil.camera
 
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
@@ -87,6 +88,9 @@ class SettingsActivity : AppCompatActivity() {
             switchRow("Record sound", "rec_audio", true)
         )
 
+        section("Staff")
+        card(staffRow())
+
         section("About")
         card(
             infoRow("About MS Camera", "Version 4") {
@@ -138,6 +142,57 @@ class SettingsActivity : AppCompatActivity() {
     private fun titleView(t: String) = TextView(this).apply {
         text = t; textSize = 17f; setTextColor(Color.WHITE)
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+    }
+
+    private val staffPrefs by lazy { getSharedPreferences(LocationTrackingService.PREFS, MODE_PRIVATE) }
+
+    private fun staffRow(): View {
+        val r = rowBase()
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val title = TextView(this).apply {
+            text = "Staff Location Sharing"; textSize = 17f; setTextColor(Color.WHITE)
+        }
+        val sub = TextView(this).apply {
+            textSize = 13f; setTextColor(Color.parseColor("#9A9A9A"))
+            setPadding(0, dp(2), 0, 0)
+        }
+        fun refreshSub() {
+            val name = staffPrefs.getString("employee_name", "") ?: ""
+            val on = staffPrefs.getBoolean("sharing_on", false)
+            sub.text = if (on) "On · office ke saath live share ho raha hai ($name)"
+                       else "Off · location kisi ke saath share nahi ho rahi"
+        }
+        refreshSub()
+        col.addView(title); col.addView(sub)
+        r.addView(col)
+
+        val sw = SwitchCompat(this)
+        sw.isChecked = staffPrefs.getBoolean("sharing_on", false)
+        val st = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+        sw.thumbTintList = ColorStateList(st, intArrayOf(Color.WHITE, Color.WHITE))
+        sw.trackTintList = ColorStateList(st, intArrayOf(Color.parseColor("#FFC107"), Color.parseColor("#5A5A5C")))
+        sw.setOnCheckedChangeListener { _, on ->
+            if (on) {
+                startActivity(Intent(this, StaffConsentActivity::class.java))
+                // StaffConsentActivity sets sharing_on only after the employee agrees;
+                // reflect the real state once we come back to this screen.
+                sw.isChecked = staffPrefs.getBoolean("sharing_on", false)
+            } else {
+                staffPrefs.edit().putBoolean("sharing_on", false).apply()
+                LocationTrackingService.stop(this)
+            }
+            refreshSub()
+        }
+        r.addView(sw)
+        return r
+    }
+
+    override fun onResume() {
+        super.onResume()
+        build()
     }
 
     private fun switchRow(title: String, key: String, def: Boolean): View {
