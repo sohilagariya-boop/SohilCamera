@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "140394223628",
+    "project_id": "ms-camera",
+    "storage_bucket": "ms-camera.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:140394223628:android:687ea35dfc99364ce0f629",
+        "android_client_info": {
+          "package_name": "com.sohil.camera"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC87Wb0u6xqrcoah84OBbvGXMuGlTh_uQs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
