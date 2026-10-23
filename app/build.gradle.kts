@@ -26,8 +26,8 @@ dependencies {
     implementation("androidx.camera:camera-effects:1.4.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.camera:camera-view:1.4.0")
-    implementation("com.google.android.gms:play-services-location:21.3.0")
-
+    implementation("com.google.android.gms:play-services-location:21.3.0"    
+     implementation("com.google.guava:guava:31.1-android")
     implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
     implementation("com.google.firebase:firebase-firestore-ktx")   
     implementation("com.google.guava:guava:31.1-android")
